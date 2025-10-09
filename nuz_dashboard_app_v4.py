@@ -6518,6 +6518,11 @@ def main():
         regions_all = sorted(map(str, df_current["Регион"].unique()))
         with sidebar:
             st.markdown("<p class='sidebar-title'>Регионы</p>", unsafe_allow_html=True)
+            pending_key = "single_regions_pending"
+            if pending_key in st.session_state:
+                st.session_state["single_regions"] = st.session_state.pop(pending_key)
+            if "single_regions" not in st.session_state:
+                st.session_state["single_regions"] = regions_all
             regions = st.multiselect(
                 "Регионы",
                 options=regions_all,
@@ -6532,15 +6537,33 @@ def main():
             high_risk_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.RISK_SHARE.value, top_n=5)
             branch_map = period_values_by_region_from_itogo(df_current, regions_all, Metrics.BRANCH_NEW_COUNT.value, months_range)
             new_branch_regions = [reg for reg, val in sorted(branch_map.items(), key=lambda kv: kv[1] if kv[1] is not None else 0, reverse=True) if val and not pd.isna(val) and val > 0][:5] if branch_map else []
-            if preset_cols[0].button("ТОП-5 выручка", use_container_width=True, key="single_preset_revenue", disabled=not top_revenue_regions):
-                st.session_state["single_regions"] = top_revenue_regions
-                st.experimental_rerun()
-            if preset_cols[1].button("Высокий риск", use_container_width=True, key="single_preset_risk", disabled=not high_risk_regions):
-                st.session_state["single_regions"] = high_risk_regions
-                st.experimental_rerun()
-            if preset_cols[2].button("Новые филиалы", use_container_width=True, key="single_preset_new", disabled=not new_branch_regions):
-                st.session_state["single_regions"] = new_branch_regions
-                st.experimental_rerun()
+            def _queue_single_regions(values: list[str]) -> None:
+                st.session_state[pending_key] = values
+
+            preset_cols[0].button(
+                "ТОП-5 выручка",
+                use_container_width=True,
+                key="single_preset_revenue",
+                disabled=not top_revenue_regions,
+                on_click=_queue_single_regions,
+                args=(top_revenue_regions,),
+            )
+            preset_cols[1].button(
+                "Высокий риск",
+                use_container_width=True,
+                key="single_preset_risk",
+                disabled=not high_risk_regions,
+                on_click=_queue_single_regions,
+                args=(high_risk_regions,),
+            )
+            preset_cols[2].button(
+                "Новые филиалы",
+                use_container_width=True,
+                key="single_preset_new",
+                disabled=not new_branch_regions,
+                on_click=_queue_single_regions,
+                args=(new_branch_regions,),
+            )
         if not regions:
             st.warning("Выберите хотя бы один регион для анализа.")
             st.stop()
@@ -6592,6 +6615,11 @@ def main():
         regions_all = sorted(map(str, combined["Регион"].unique()))
         with sidebar:
             st.markdown("<p class='sidebar-title'>Регионы</p>", unsafe_allow_html=True)
+            pending_key = "compare_regions_pending"
+            if pending_key in st.session_state:
+                st.session_state["compare_regions"] = st.session_state.pop(pending_key)
+            if "compare_regions" not in st.session_state:
+                st.session_state["compare_regions"] = regions_all
             regions = st.multiselect(
                 "Регионы",
                 options=regions_all,
@@ -6606,15 +6634,33 @@ def main():
             high_risk_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.RISK_SHARE.value, top_n=5)
             branch_map_cmp = period_values_by_region_from_itogo(df_current, regions_all, Metrics.BRANCH_NEW_COUNT.value, months_range)
             new_branch_regions = [reg for reg, val in sorted(branch_map_cmp.items(), key=lambda kv: kv[1] if kv[1] is not None else 0, reverse=True) if val and not pd.isna(val) and val > 0][:5] if branch_map_cmp else []
-            if preset_cols[0].button("ТОП-5 выручка", use_container_width=True, key="compare_preset_revenue", disabled=not top_revenue_regions):
-                st.session_state["compare_regions"] = top_revenue_regions
-                st.experimental_rerun()
-            if preset_cols[1].button("Высокий риск", use_container_width=True, key="compare_preset_risk", disabled=not high_risk_regions):
-                st.session_state["compare_regions"] = high_risk_regions
-                st.experimental_rerun()
-            if preset_cols[2].button("Новые филиалы", use_container_width=True, key="compare_preset_new", disabled=not new_branch_regions):
-                st.session_state["compare_regions"] = new_branch_regions
-                st.experimental_rerun()
+            def _queue_compare_regions(values: list[str]) -> None:
+                st.session_state[pending_key] = values
+
+            preset_cols[0].button(
+                "ТОП-5 выручка",
+                use_container_width=True,
+                key="compare_preset_revenue",
+                disabled=not top_revenue_regions,
+                on_click=_queue_compare_regions,
+                args=(top_revenue_regions,),
+            )
+            preset_cols[1].button(
+                "Высокий риск",
+                use_container_width=True,
+                key="compare_preset_risk",
+                disabled=not high_risk_regions,
+                on_click=_queue_compare_regions,
+                args=(high_risk_regions,),
+            )
+            preset_cols[2].button(
+                "Новые филиалы",
+                use_container_width=True,
+                key="compare_preset_new",
+                disabled=not new_branch_regions,
+                on_click=_queue_compare_regions,
+                args=(new_branch_regions,),
+            )
         if not regions:
             st.warning("Выберите хотя бы один регион для анализа.")
             st.stop()
