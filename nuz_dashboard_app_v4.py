@@ -478,6 +478,12 @@ METRIC_CATEGORY_OVERRIDES: Dict[str, str] = {
     Metrics.NEW_UNIQUE_CLIENTS.value: "НЮЗ",
 }
 
+HIDDEN_METRICS = {
+    Metrics.DEBT.value,
+    Metrics.DEBT_NO_SALE.value,
+    Metrics.DEBT_UNITS.value,
+}
+
 
 def append_risk_share_metric(df: pd.DataFrame) -> pd.DataFrame:
     needed = {Metrics.BELOW_LOAN.value, Metrics.REVENUE.value, Metrics.DEBT_NO_SALE.value}
@@ -507,12 +513,6 @@ def append_risk_share_metric(df: pd.DataFrame) -> pd.DataFrame:
             risk_df["Показатель"] = Metrics.RISK_SHARE.value
             derived_frames.append(risk_df)
 
-    debt_series = pivot.get(Metrics.DEBT_NO_SALE.value)
-    if debt_series is not None and not debt_series.dropna().empty:
-        debt_df = debt_series.reset_index().rename(columns={0: "Значение"})
-        debt_df["Показатель"] = Metrics.DEBT.value
-        derived_frames.append(debt_df)
-
     if not derived_frames:
         return df
 
@@ -524,7 +524,7 @@ def append_risk_share_metric(df: pd.DataFrame) -> pd.DataFrame:
             derived[col] = pd.NA
 
     key_cols = ["Регион", "Подразделение", "Категория", "Код", "Показатель", "Месяц", "Год"]
-    existing_keys = set(tuple(row) for row in df[df["Показатель"].isin({Metrics.RISK_SHARE.value, Metrics.DEBT.value})][key_cols].itertuples(index=False, name=None))
+    existing_keys = set(tuple(row) for row in df[df["Показатель"] == Metrics.RISK_SHARE.value][key_cols].itertuples(index=False, name=None))
     derived = derived[~derived[key_cols].apply(tuple, axis=1).isin(existing_keys)]
     return pd.concat([df, derived[order]], ignore_index=True)
 
@@ -533,7 +533,6 @@ ORDER = ["Январь","Февраль","Март","Апрель","Май","И�
 ORDER_WITH_TOTAL = ORDER + ["Итого"]
 
 NUZ_ACTIVITY_METRICS = {
-    Metrics.DEBT_NO_SALE.value,
     Metrics.LOAN_ISSUE.value,
     Metrics.LOAN_ISSUE_UNITS.value,
     Metrics.PENALTIES_RECEIVED.value,
@@ -551,12 +550,10 @@ NUZ_ACTIVITY_METRICS = {
     Metrics.BELOW_LOAN_UNITS.value,
     Metrics.BELOW_LOAN.value,
     Metrics.LOSS_BELOW_LOAN.value,
-    Metrics.DEBT_UNITS.value,
     Metrics.ILLIQUID_BY_COUNT_PCT.value,
     Metrics.ILLIQUID_BY_VALUE_PCT.value,
     Metrics.YIELD.value,
     Metrics.ISSUE_SHARE.value,
-    Metrics.DEBT_SHARE.value,
     Metrics.INTEREST_SHARE.value,
     Metrics.PLAN_ISSUE_PCT.value,
     Metrics.PLAN_PENALTIES_PCT.value,
@@ -568,8 +565,6 @@ FORECAST_METRICS = [
     Metrics.LOAN_ISSUE.value,
     Metrics.PENALTIES_RECEIVED.value,
     Metrics.MARKUP_PCT.value,
-    Metrics.DEBT_NO_SALE.value,
-    Metrics.DEBT.value,
     Metrics.PLAN_ISSUE_PCT.value,
     Metrics.PLAN_PENALTIES_PCT.value,
     Metrics.PLAN_REVENUE_PCT.value,
@@ -603,8 +598,6 @@ TAB_METRIC_SETS: Dict[str, List[str]] = {
         Metrics.RISK_SHARE.value,
         Metrics.ILLIQUID_BY_VALUE_PCT.value,
         Metrics.ILLIQUID_BY_COUNT_PCT.value,
-        Metrics.DEBT.value,
-        Metrics.DEBT_NO_SALE.value,
         Metrics.BELOW_LOAN.value,
     ],
 }
@@ -668,14 +661,16 @@ def get_monthly_totals_from_file(df_raw: pd.DataFrame, regions: Tuple[str, ...],
     )
     return aggregated
 
+@st.cache_data(show_spinner=False, max_entries=256)
 def month_series_from_file(df_all, regions, metric, months):
+    months_tuple = tuple(months)
     dfm = get_monthly_totals_from_file(df_all, tuple(regions), metric)
     if dfm.empty:
         return pd.Series(dtype=float)
-    s = (dfm[dfm["Месяц"].astype(str).isin(months)]
+    s = (dfm[dfm["Месяц"].astype(str).isin(months_tuple)]
             .groupby("Месяц", observed=True)["Значение"].sum())
     # строгая сортировка по календарю
-    s = s.reindex([m for m in months if m in s.index])
+    s = s.reindex([m for m in months_tuple if m in s.index])
     return s
 
 @st.cache_data
@@ -735,8 +730,10 @@ def aggregation_rule(metric: str) -> str:
     # по умолчанию: проценты — mean, деньги/шт — sum
     return "mean" if is_percent_metric(metric) else "sum"
 
+@st.cache_data(show_spinner=False, max_entries=512)
 def period_value_from_itogo(df_all: pd.DataFrame, regions: list[str], metric: str, months: list[str]) -> float | None:
-    s = month_series_from_file(df_all, regions, metric, months)
+    months_tuple = tuple(months)
+    s = month_series_from_file(df_all, regions, metric, months_tuple)
     if s.empty:
         return None
     rule = aggregation_rule(metric)
@@ -758,13 +755,15 @@ def period_value_from_itogo(df_all: pd.DataFrame, regions: list[str], metric: st
         result = float(vals.mean())
     return _maybe_scale_percent(metric, result)
 
+@st.cache_data(show_spinner=False, max_entries=1024)
 def period_value_from_itogo_for_region(df_all: pd.DataFrame, region: str, metric: str,
                                        months: list[str], *, snapshots_mode: str = "last") -> float | None:
+    months_tuple = tuple(months)
     # Берём ровно строки «Итого по месяцу» для региона
     dfm = get_monthly_totals_from_file(df_all, (region,), metric)
     if dfm.empty:
         return None
-    part = dfm[dfm["Месяц"].astype(str).isin(months)]
+    part = dfm[dfm["Месяц"].astype(str).isin(months_tuple)]
     if part.empty:
         return None
 
@@ -794,16 +793,18 @@ def period_value_from_itogo_for_region(df_all: pd.DataFrame, region: str, metric
     return float(vals.mean())
 
 
+@st.cache_data(show_spinner=False, max_entries=256)
 def period_values_by_region_from_itogo(df_all, regions, metric, months) -> dict[str, float]:
     """
     Возвращает {Регион: значение за период} строго из строк «Итого по месяцу».
     Сумма/среднее/последний — как задано aggregation_rule(metric).
     """
+    months_tuple = tuple(months)
     dfm = get_monthly_totals_from_file(df_all, tuple(regions), metric)
     if dfm.empty:
         return {}
 
-    dfm = dfm[dfm["Месяц"].astype(str).isin(months)].copy()
+    dfm = dfm[dfm["Месяц"].astype(str).isin(months_tuple)].copy()
     if dfm.empty:
         return {}
 
@@ -830,6 +831,99 @@ def period_values_by_region_from_itogo(df_all, regions, metric, months) -> dict[
     return out
 
 
+MANDATORY_COLUMNS = {"Регион", "Подразделение", "Показатель", "Месяц", "Значение"}
+COHORT_REQUIRED_METRICS = {Metrics.UNIQUE_CLIENTS.value, Metrics.NEW_UNIQUE_CLIENTS.value}
+RISK_REQUIRED_METRICS = {Metrics.RISK_SHARE.value, Metrics.ILLIQUID_BY_VALUE_PCT.value}
+SALES_REQUIRED_METRICS = {Metrics.REVENUE.value, Metrics.MARKUP_PCT.value}
+TAB_METRIC_DEPENDENCIES: Dict[str, set[str]] = {
+    "Риски": RISK_REQUIRED_METRICS,
+    "Когорты": COHORT_REQUIRED_METRICS,
+    "Распродажа": SALES_REQUIRED_METRICS,
+}
+
+
+def compute_health_report(df_current: pd.DataFrame, months_range: List[str]) -> Dict[str, Any]:
+    report: Dict[str, Any] = {}
+    report["missing_columns"] = [col for col in MANDATORY_COLUMNS if col not in df_current.columns]
+    available_metrics = set(df_current["Показатель"].dropna().unique())
+    report["missing_key_metrics"] = [m for m in KEY_DECISION_METRICS if m not in available_metrics]
+    report["tab_dependencies"] = {
+        tab: sorted(metric for metric in metrics if metric not in available_metrics)
+        for tab, metrics in TAB_METRIC_DEPENDENCIES.items()
+    }
+    present_months = sorted_months_safe(df_current.get("Месяц"))
+    report["missing_months"] = [m for m in months_range if m not in present_months]
+    regions = sorted(map(str, df_current.get("Регион", pd.Series(dtype=str)).dropna().unique()))
+    missing_coords = [reg for reg in regions if _resolve_region_coordinates_static(reg) is None]
+    report["missing_coordinates"] = missing_coords
+    report["total_rows"] = int(len(df_current))
+    return report
+
+
+def render_health_check(ctx: PageContext) -> None:
+    report = compute_health_report(ctx.df_current, ctx.months_range)
+    issues_present = bool(
+        report["missing_columns"] or report["missing_key_metrics"] or
+        any(report["tab_dependencies"].values()) or report["missing_months"] or report["missing_coordinates"]
+    )
+    with st.expander("🩺 Health-check данных", expanded=issues_present):
+        missing_cols = report["missing_columns"]
+        if missing_cols:
+            st.warning("Отсутствуют обязательные столбцы: " + ", ".join(missing_cols))
+        else:
+            st.markdown("- **Обязательные столбцы:** ✅ всё на месте")
+
+        if report["missing_key_metrics"]:
+            st.warning("Недостающие ключевые метрики: " + ", ".join(report["missing_key_metrics"]))
+        else:
+            st.markdown("- **Ключевые метрики:** ✅ в наличии")
+
+        tab_messages = []
+        for tab, missing in report["tab_dependencies"].items():
+            if missing:
+                tab_messages.append(f"{tab}: {', '.join(missing)}")
+        if tab_messages:
+            st.markdown("- **Что добавить для вкладок:**\n  - " + "\n  - ".join(tab_messages))
+        else:
+            st.markdown("- **Вкладки:** ✅ все разделы могут работать")
+
+        if report["missing_months"]:
+            st.markdown("- **Месяцы без данных:** " + ", ".join(report["missing_months"]))
+        else:
+            st.markdown("- **Месяцы:** ✅ покрывает выбранный период")
+
+        if report["missing_coordinates"]:
+            st.markdown("- **Координаты регионов:** требуется добавить для: " + ", ".join(report["missing_coordinates"]))
+        else:
+            st.markdown("- **Координаты регионов:** ✅ все распознаны")
+
+        st.caption(f"Строк в текущем наборе: {report['total_rows']:,}".replace(",", " "))
+
+
+def render_faq_block() -> None:
+    with st.expander("📚 FAQ / Формулы", expanded=False):
+        st.markdown(
+            """
+            - **Выручка от распродажи НЮЗ (руб)** — прямое значение из файла, используется как сумма для всех агрегатов.
+            - **Процент наценки НЮЗ** — `Получено наценки / Выручка × 100`; помогает оценить маржу распродажи.
+            - **Доля ниже займа, %** — `Товар проданный ниже суммы займа / Выручка × 100`; сигнализирует о доле убыточных продаж.
+            - **Новые / Уникальные клиенты** — суммарные значения по филиалам; нужны для вкладки «Когорты» и AI-аналитики.
+            - **Лидеры и сигналы** опираются на пороги из сайдбара: минимальную наценку, максимальный риск и лимит убытка.
+            - Если вкладка не отображает данные, проверьте раздел Health-check: он подскажет, какие столбцы или метрики добавить.
+            """
+        )
+
+
+def _top_regions_by_metric(df_source: pd.DataFrame, regions_all: List[str], months_range: List[str], metric: str, *, top_n: int = 5, ascending: bool = False) -> List[str]:
+    values = period_values_by_region_from_itogo(df_source, regions_all, metric, months_range)
+    if not values:
+        return []
+    filtered = [(reg, val) for reg, val in values.items() if val is not None and not pd.isna(val)]
+    if not filtered:
+        return []
+    sorted_items = sorted(filtered, key=lambda kv: kv[1], reverse=not ascending)
+    return [reg for reg, _ in sorted_items[:top_n]]
+
 METRICS_BIGGER_IS_BETTER = {
     Metrics.REVENUE.value, Metrics.LOAN_ISSUE.value, Metrics.MARKUP_PCT.value,
     Metrics.YIELD.value, Metrics.PENALTIES_RECEIVED.value, Metrics.MARKUP_AMOUNT.value,
@@ -841,7 +935,7 @@ METRICS_SMALLER_IS_BETTER = {
 }
 
 METRIC_HELP: Dict[str, str] = {
-    Metrics.MARKUP_PCT.value: "Показатель прибыльности распродажи: насколько цена реализации превышает оценочную (ссудную) стоимость. Высокий % наценки означает, что залоговые изделия продаются существенно дороже суммы выданных по ним займов, что хорошо для прибыли.",
+    Metrics.MARKUP_PCT.value: "Наценка на распродажу: отношение суммы полученной наценки к выручке от распродажи (Получено наценки / Выручка × 100). Показывает, насколько итоговая цена превышает оценочную стоимость; высокий % означает, что распродажа защищает маржу.",
     Metrics.RISK_SHARE.value: "Доля продаж ниже займа: вычисляется как 'Товар проданный ниже суммы займа НЮЗ (руб)' / 'Выручка от распродажи НЮЗ (руб)' × 100. Рост показателя означает рост убыточных реализаций и напрямую связан с риском.",
     Metrics.YIELD.value: "Эффективность выдач: отношение полученных процентов и пеней к сумме выданных займов за период. Проще говоря, средний процентный доход с каждого выданного рубля. На доходность влияет срок и процентная ставка займов.",
     Metrics.AVG_LOAN_TERM.value: "Среднее время, на которое клиенты брали займы. Длинный срок может увеличивать процентные доходы, но и откладывает возврат денег. Короткий срок свидетельствует либо о быстром возврате, либо о переходе займа в стадию продажи.",
@@ -993,14 +1087,15 @@ def _collect_comparison_metrics(df_a: pd.DataFrame, df_b: pd.DataFrame, regions:
     return _collect_period_metrics(df_a, regions, months_range), _collect_period_metrics(df_b, regions, months_range)
 
 
+@st.cache_data(show_spinner=False, max_entries=512)
 def _monthly_series_for_metric(df_source: pd.DataFrame, regions: List[str], metric: str, months_range: List[str]) -> pd.Series:
-    ser = month_series_from_file(df_source, tuple(regions), metric, months_range)
+    months_tuple = tuple(months_range)
+    ser = month_series_from_file(df_source, tuple(regions), metric, months_tuple)
     if ser.empty:
         return ser
-    ser = ser.dropna()
-    if ser.empty:
-        return ser
-    return ser.apply(lambda v: None if pd.isna(v) else float(v))
+    ser = ser.reindex(months_tuple).fillna(0.0)
+    ser = pd.to_numeric(ser, errors="coerce").fillna(0.0)
+    return ser.astype(float)
 
 
 def _format_monthly_series(metric: str, series: pd.Series) -> str:
@@ -1670,6 +1765,7 @@ class PageContext:
     year_previous: int | None
     color_map: Dict[str, str]
     strict_mode: bool
+    thresholds: Dict[str, float] | None = None
 
 
 def _calc_pct_change(new: float | None, old: float | None) -> float | None:
@@ -2350,7 +2446,7 @@ def render_alert_cards(alerts: List[Dict[str, Any]], *, max_cards: int = 3) -> N
 
 def render_correlation_block(df_source: pd.DataFrame, regions: List[str], months_range: List[str], *, default_metrics: List[str]) -> None:
     st.subheader("📈 Корреляции показателей")
-    available = sorted({m for m in df_source["Показатель"].dropna().unique() if m in ACCEPTED_METRICS_CANONICAL})
+    available = sorted({m for m in df_source["Показатель"].dropna().unique() if m in ACCEPTED_METRICS_CANONICAL and m not in HIDDEN_METRICS})
     if not available:
         st.info("Недостаточно данных для построения корреляций.")
         return
@@ -2457,6 +2553,110 @@ def render_revenue_waterfall(ctx: PageContext) -> None:
     fig.update_layout(height=420, margin=dict(l=40, r=40, t=40, b=40), showlegend=False)
     st.plotly_chart(fig, use_container_width=True, key="revenue_waterfall")
     st.caption(f"Старт: {format_rub(start_total)} → Конец: {format_rub(end_total)}.")
+
+
+def sales_intelligence_block(ctx: PageContext, thresholds: Dict[str, float] | None = None) -> None:
+    st.subheader("🧠 Интеллект продаж по регионам")
+    st.caption("Сводный взгляд на выручку, маржу и риск по регионам: сверху таблица и рекомендации, ниже — карта наценка ↔ риск.")
+    revenue_map = period_values_by_region_from_itogo(ctx.df_current, ctx.regions, Metrics.REVENUE.value, ctx.months_range)
+    if not revenue_map:
+        st.info("Нет данных по выручке для выбранного окна.")
+        return
+    markup_map = period_values_by_region_from_itogo(ctx.df_current, ctx.regions, Metrics.MARKUP_PCT.value, ctx.months_range)
+    risk_map = period_values_by_region_from_itogo(ctx.df_current, ctx.regions, Metrics.RISK_SHARE.value, ctx.months_range)
+
+    rows: list[dict[str, float | str]] = []
+    for region, value in revenue_map.items():
+        if value is None or pd.isna(value):
+            continue
+        rows.append({
+            "Регион": region,
+            "Выручка, ₽": float(value),
+            "Наценка, %": float(markup_map.get(region)) if markup_map and markup_map.get(region) not in (None, np.nan) else np.nan,
+            "Риск, %": float(risk_map.get(region)) if risk_map and risk_map.get(region) not in (None, np.nan) else np.nan,
+        })
+    if not rows:
+        st.info("Нет регионов с данными по выручке.")
+        return
+
+    df = pd.DataFrame(rows).sort_values("Выручка, ₽", ascending=False)
+    total_revenue = float(df["Выручка, ₽"].sum())
+    if total_revenue > 0:
+        df["Доля, %"] = (df["Выручка, ₽"] / total_revenue) * 100
+    if df["Наценка, %"].notna().any():
+        mean_markup = float(df["Наценка, %"].dropna().mean())
+        df["Δ наценки к средн."] = df["Наценка, %"] - mean_markup
+    if thresholds:
+        df["Сигнал"] = ""
+        min_markup = thresholds.get("min_markup")
+        max_risk = thresholds.get("max_risk")
+        for idx, row in df.iterrows():
+            notes: List[str] = []
+            if min_markup is not None and not pd.isna(row.get("Наценка, %")) and row["Наценка, %"] < min_markup:
+                notes.append("⬇︎ наценка")
+            if max_risk is not None and not pd.isna(row.get("Риск, %")) and row["Риск, %"] > max_risk:
+                notes.append("⚠️ риск")
+            if notes:
+                df.at[idx, "Сигнал"] = ", ".join(notes)
+    else:
+        df["Сигнал"] = ""
+    column_config = {
+        "Выручка, ₽": st.column_config.NumberColumn("Выручка, ₽", format="%.0f"),
+        "Наценка, %": st.column_config.NumberColumn("Наценка, %", format="%.2f"),
+        "Риск, %": st.column_config.NumberColumn("Риск, %", format="%.2f"),
+    }
+    if "Доля, %" in df.columns:
+        column_config["Доля, %"] = st.column_config.NumberColumn("Доля от итога, %", format="%.1f%%")
+    if "Δ наценки к средн." in df.columns:
+        column_config["Δ наценки к средн."] = st.column_config.NumberColumn("Δ наценки к средн., п.п.", format="%.2f")
+    if "Сигнал" in df.columns:
+        column_config["Сигнал"] = st.column_config.TextColumn("Сигнал")
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
+
+    insights: list[str] = []
+    top_row = df.iloc[0]
+    if "Доля, %" in df.columns:
+        insights.append(f"Лидер по выручке — {top_row['Регион']}: {format_rub(top_row['Выручка, ₽'])} ({top_row['Доля, %']:.1f}% от суммарной выручки).")
+    else:
+        insights.append(f"Лидер по выручке — {top_row['Регион']}: {format_rub(top_row['Выручка, ₽'])}.")
+    if df["Наценка, %"].notna().any():
+        best_markup = df.sort_values("Наценка, %", ascending=False).iloc[0]
+        delta_markup = best_markup.get("Δ наценки к средн.")
+        extra = "" if pd.isna(delta_markup) else f" (Δ к среднему {delta_markup:+.2f} п.п.)"
+        insights.append(f"Максимальная наценка — {best_markup['Регион']}: {fmt_pct(best_markup['Наценка, %'])}{extra}.")
+    if df["Риск, %"].notna().any():
+        highest_risk = df.sort_values("Риск, %", ascending=False).iloc[0]
+        insights.append(f"Самый высокий риск продаж ниже займа у {highest_risk['Регион']}: {fmt_pct(highest_risk['Риск, %'])}.")
+    _render_insights("Главные наблюдения", insights)
+
+    flagged = df[df["Сигнал"].astype(str).str.len() > 0]
+    if not flagged.empty:
+        st.markdown("**Сигналы порогов:**\n" + "\n".join(f"- {row['Регион']}: {row['Сигнал']}" for _, row in flagged.iterrows()))
+
+    revenue_series = df.set_index("Регион")["Выручка, ₽"]
+    action_lines = _generate_actions_for_series(revenue_series, Metrics.REVENUE.value)
+    _render_plan("Рекомендации по выручке", action_lines[:4])
+
+    scatter_df = df.dropna(subset=["Наценка, %", "Риск, %"]).copy()
+    if not scatter_df.empty:
+        scatter = px.scatter(
+            scatter_df,
+            x="Наценка, %",
+            y="Риск, %",
+            size=scatter_df["Выручка, ₽"].clip(lower=0.0),
+            color="Регион",
+            hover_data={
+                "Регион": True,
+                "Выручка, ₽": ':,.0f',
+                "Наценка, %": ':.2f',
+                "Риск, %": ':.2f',
+                "Доля, %": ':.1f' if "Доля, %" in scatter_df else False,
+            },
+            labels={"Наценка, %": "Наценка, %", "Риск, %": "Риск ниже займа, %"},
+            title="Региональная карта: наценка vs риск",
+        )
+        scatter.update_layout(height=360, margin=dict(l=40, r=40, t=60, b=40))
+        st.plotly_chart(scatter, use_container_width=True, key="sales_risk_markup")
 
 
 def render_scenario_simulator(ctx: PageContext) -> None:
@@ -2764,12 +2964,16 @@ def render_margin_capacity_planner(ctx: PageContext, widget_prefix: str = "margi
 
 def risk_alerts_block(ctx: PageContext) -> dict[str, float | None]:
     st.subheader("🔔 Сигналы риска")
+    thresholds = ctx.thresholds or {}
+    default_risk = float(thresholds.get("max_risk", 25.0))
+    default_markup = float(thresholds.get("min_markup", 45.0))
+    default_loss = float(thresholds.get("loss_cap", 5.0))
     col_risk, col_markup, col_loss = st.columns(3)
     risk_threshold = col_risk.number_input(
         "Порог доли ниже займа, %",
         min_value=0.0,
         max_value=100.0,
-        value=25.0,
+        value=default_risk,
         step=1.0,
         help="Сигнал, если доля продаж ниже займа превышает этот уровень."
     )
@@ -2777,7 +2981,7 @@ def risk_alerts_block(ctx: PageContext) -> dict[str, float | None]:
         "Минимальная наценка, %",
         min_value=0.0,
         max_value=200.0,
-        value=45.0,
+        value=default_markup,
         step=1.0,
         help="Сигнал, если средняя наценка опускается ниже заданного порога."
     )
@@ -2785,7 +2989,7 @@ def risk_alerts_block(ctx: PageContext) -> dict[str, float | None]:
         "Лимит убытка ниже займа, млн ₽",
         min_value=0.0,
         max_value=500.0,
-        value=5.0,
+        value=default_loss,
         step=0.5,
         help="Сигнал, если суммарный убыток от продаж ниже займа превышает бюджет."
     )
@@ -2857,6 +3061,12 @@ def risk_alerts_block(ctx: PageContext) -> dict[str, float | None]:
         )
     if bullet_points:
         st.markdown("**Статус:**<br>" + "<br>".join(bullet_points), unsafe_allow_html=True)
+
+    st.session_state["thresholds_config"] = {
+        "min_markup": float(markup_floor),
+        "max_risk": float(risk_threshold),
+        "loss_cap": float(loss_cap_mln),
+    }
 
     return {
         "risk_threshold": risk_threshold,
@@ -2965,6 +3175,7 @@ def risk_markup_heatmap_block(ctx: PageContext) -> None:
 
 def risk_failure_forecast_block(ctx: PageContext, risk_threshold: float | None) -> None:
     st.subheader("📉 Прогноз провалов по риску")
+    st.caption("Прогноз доли продаж ниже суммы займа на ближайшие месяцы. Используем линейный тренд по факту: линия — ожидаемый процент, область — 95% интервал. Если установлен порог, показываем, где прогноз его превышает.")
     forecast_bundle = _prepare_forecast(
         ctx.df_current,
         ctx.regions,
@@ -3172,6 +3383,7 @@ def _extract_region_month_metric(df_source: pd.DataFrame, regions: list[str], me
 
 def render_region_band_chart(ctx: PageContext) -> None:
     st.subheader("🎀 Ленточный график выручки по регионам")
+    st.caption("Лента отображает диапазон 10–90 перцентилей по выручке, тёмная линия — медиана. Так видно типичный коридор и выбросы по регионам.")
     df_metric = _extract_region_month_metric(ctx.df_current, ctx.regions, Metrics.REVENUE.value, ctx.months_range)
     if df_metric.empty:
         st.info("Нет данных по выручке для выбранных регионов.")
@@ -3274,7 +3486,7 @@ def render_markup_candlestick(ctx: PageContext) -> None:
 
 
 def render_region_map_block(ctx: PageContext) -> None:
-    st.subheader("🗺️ Карта интенсивности регионов")
+    st.subheader("🗺️ Интенсивность по регионам и подразделениям")
     map_metrics = [
         (Metrics.REVENUE.value, "Выручка, ₽"),
         (Metrics.RISK_SHARE.value, "Доля продаж ниже займа, %"),
@@ -3287,30 +3499,52 @@ def render_region_map_block(ctx: PageContext) -> None:
         key="region_map_mode"
     )
     metric_choice = st.selectbox(
-        "Метрика на карте",
+        "Метрика",
         options=map_metrics,
         format_func=lambda item: item[1],
         key="region_map_metric"
     )
     metric_key = metric_choice[0]
-    values = period_values_by_region_from_itogo(ctx.df_current, ctx.regions, metric_key, ctx.months_range)
-    if not values:
+    st.caption(METRIC_HELP.get(metric_key, ""))
+
+    sub = strip_totals_rows(ctx.df_current)
+    sub = sub[
+        (sub["Регион"].isin(ctx.regions)) &
+        (sub["Месяц"].astype(str).isin(ctx.months_range)) &
+        (sub["Показатель"] == metric_key)
+    ].copy()
+    if sub.empty:
         st.info("Нет данных для выбранной метрики.")
         return
+
+    agg = (
+        sub.groupby(["Регион", "Подразделение"], observed=True)["Значение"]
+        .sum()
+        .reset_index()
+    )
+    agg["Значение"] = pd.to_numeric(agg["Значение"], errors="coerce")
+    agg = agg.dropna(subset=["Значение"])
+    if agg.empty:
+        st.info("Недостаточно данных после агрегации по подразделениям.")
+        return
+
+    percent_metric = is_percent_metric(metric_key)
+    if percent_metric and agg["Значение"].abs().median() <= 1.5:
+        agg["Значение"] *= 100.0
+
     rows: List[Dict[str, Any]] = []
     missing_regions: List[str] = []
-    for region, value in values.items():
-        if value is None or pd.isna(value):
-            continue
-        coords = resolve_region_coordinates(region)
+    for _, row in agg.iterrows():
+        coords = resolve_region_coordinates(str(row["Регион"]))
         if not coords:
-            missing_regions.append(region)
+            missing_regions.append(str(row["Регион"]))
             continue
         rows.append({
-            "Регион": region,
+            "Регион": row["Регион"],
+            "Подразделение": row["Подразделение"],
             "lat": coords[0],
             "lon": coords[1],
-            "Значение": float(value),
+            "Значение": float(row["Значение"]),
         })
     if not rows:
         st.info("Не удалось сопоставить регионы с координатами. Добавьте их в словарь REGION_COORDS.")
@@ -3318,18 +3552,18 @@ def render_region_map_block(ctx: PageContext) -> None:
     df_map = pd.DataFrame(rows)
     if missing_regions:
         st.caption("Не найдены координаты для: " + ", ".join(sorted(set(missing_regions))))
-    percent_metric = is_percent_metric(metric_key)
 
     df_ranked = df_map.sort_values("Значение", ascending=percent_metric and metric_key in METRICS_SMALLER_IS_BETTER)
     if view_mode == "Лента лидеров" or df_map["lat"].isna().all():
         df_ranked = df_ranked.copy()
+        df_ranked["Ключ"] = df_ranked["Регион"] + " · " + df_ranked["Подразделение"].fillna("—")
         df_ranked["Значение, отображение"] = df_ranked["Значение"].apply(
             lambda v: fmt_pct(v) if percent_metric else format_rub(v)
         )
         bar_fig = px.bar(
             df_ranked,
             x="Значение",
-            y="Регион",
+            y="Ключ",
             color="Значение",
             orientation="h",
             color_continuous_scale="Blues" if not percent_metric else "Oranges",
@@ -3344,19 +3578,25 @@ def render_region_map_block(ctx: PageContext) -> None:
         )
         st.plotly_chart(bar_fig, use_container_width=True, key="region_leaderboard")
         st.dataframe(
-            df_ranked[["Регион", "Значение, отображение"]],
+            df_ranked[["Регион", "Подразделение", "Значение, отображение"]],
             use_container_width=True,
             hide_index=True,
             column_config={"Значение, отображение": "Значение"},
         )
+        st.caption("Столбики отсортированы по значению: сверху топ подразделения, в таблице можно быстро найти нужный регион." )
     else:
         color_values = df_map["Значение"]
-        size_values = np.clip(np.sqrt(np.abs(color_values.fillna(0.0))), 4, None)
+        size_raw = color_values.fillna(0.0).abs()
+        if percent_metric:
+            normalized = size_raw / (size_raw.max() or 1.0)
+            size_values = 6 + normalized * 12
+        else:
+            size_values = 6 + np.log1p(size_raw)
         fig = go.Figure(go.Scattergeo(
             lon=df_map["lon"],
             lat=df_map["lat"],
             text=df_map["Регион"],
-            customdata=np.column_stack([df_map["Значение"]]),
+            customdata=np.column_stack([df_map["Подразделение"], df_map["Значение"]]),
             marker=dict(
                 size=size_values,
                 color=color_values,
@@ -3369,7 +3609,7 @@ def render_region_map_block(ctx: PageContext) -> None:
                 sizemode="diameter",
                 opacity=0.85,
             ),
-            hovertemplate="<b>%{text}</b><br>Значение: %{customdata[0]:.2f}" + ("%" if percent_metric else " ₽") + "<extra></extra>",
+            hovertemplate="<b>%{text}</b><br>Подразделение: %{customdata[0]}<br>Значение: %{customdata[1]:.2f}" + ("%" if percent_metric else " ₽") + "<extra></extra>",
             name="",
         ))
         fig.update_layout(
@@ -3386,6 +3626,107 @@ def render_region_map_block(ctx: PageContext) -> None:
         )
         st.plotly_chart(fig, use_container_width=True, key="region_map")
         st.caption("Размер круга отражает масштаб показателя, цвет — его уровень. Координаты можно расширить в REGION_COORDS или через авто-геокодер (сохраняется в сессии).")
+
+
+def render_region_map_block(ctx: PageContext) -> None:  # override with matrix-based view
+    st.subheader("📍 Интенсивность по регионам и подразделениям")
+    map_metrics = [
+        (Metrics.REVENUE.value, "Выручка, ₽"),
+        (Metrics.RISK_SHARE.value, "Доля продаж ниже займа, %"),
+        (Metrics.MARKUP_PCT.value, "Процент наценки, %"),
+    ]
+    view_mode = st.radio(
+        "Формат отображения",
+        options=["Лента лидеров", "Теплокарта"],
+        horizontal=True,
+        key="region_map_mode"
+    )
+    metric_choice = st.selectbox(
+        "Метрика",
+        options=map_metrics,
+        format_func=lambda item: item[1],
+        key="region_map_metric"
+    )
+    metric_key = metric_choice[0]
+    st.caption(METRIC_HELP.get(metric_key, ""))
+
+    sub = strip_totals_rows(ctx.df_current)
+    sub = sub[
+        (sub["Регион"].isin(ctx.regions)) &
+        (sub["Месяц"].astype(str).isin(ctx.months_range)) &
+        (sub["Показатель"] == metric_key)
+    ].copy()
+    if sub.empty:
+        st.info("Нет данных для выбранной метрики.")
+        return
+
+    agg = (
+        sub.groupby(["Регион", "Подразделение"], observed=True)["Значение"]
+        .sum()
+        .reset_index()
+    )
+    agg["Значение"] = pd.to_numeric(agg["Значение"], errors="coerce")
+    agg = agg.dropna(subset=["Значение"])
+    if agg.empty:
+        st.info("Недостаточно данных после агрегации по подразделениям.")
+        return
+
+    percent_metric = is_percent_metric(metric_key)
+    if percent_metric and agg["Значение"].abs().median() <= 1.5:
+        agg["Значение"] *= 100.0
+
+    df_ranked = agg.sort_values("Значение", ascending=percent_metric and metric_key in METRICS_SMALLER_IS_BETTER)
+    if view_mode == "Лента лидеров":
+        df_ranked = df_ranked.copy()
+        df_ranked["Ключ"] = df_ranked["Регион"] + " · " + df_ranked["Подразделение"].fillna("—")
+        df_ranked["Значение, отображение"] = df_ranked["Значение"].apply(
+            lambda v: fmt_pct(v) if percent_metric else format_rub(v)
+        )
+        bar_fig = px.bar(
+            df_ranked,
+            x="Значение",
+            y="Ключ",
+            color="Значение",
+            orientation="h",
+            color_continuous_scale="Blues" if not percent_metric else "Oranges",
+        )
+        bar_fig.update_layout(
+            height=420,
+            margin=dict(l=40, r=20, t=40, b=40),
+            coloraxis_showscale=False,
+        )
+        bar_fig.update_traces(
+            hovertemplate="<b>%{y}</b><br>Значение: %{x:.2f}" + ("%" if percent_metric else " ₽") + "<extra></extra>"
+        )
+        st.plotly_chart(bar_fig, use_container_width=True, key="region_leaderboard")
+        st.dataframe(
+            df_ranked[["Регион", "Подразделение", "Значение, отображение"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Значение, отображение": "Значение"},
+        )
+        st.caption("Столбики отсортированы по значению: сверху топ подразделения, в таблице можно быстро найти нужный регион.")
+        return
+
+    pivot = agg.pivot_table(index="Регион", columns="Подразделение", values="Значение", aggfunc="sum", observed=True)
+    if pivot.empty:
+        st.info("Недостаточно данных для теплокарты.")
+        return
+    totals = pivot.abs().sum(axis=0).sort_values(ascending=percent_metric and metric_key in METRICS_SMALLER_IS_BETTER)
+    top_columns = totals.index[: min(15, len(totals))]
+    pivot = pivot[top_columns].fillna(0.0)
+
+    heat = go.Figure(go.Heatmap(
+        z=pivot.values,
+        x=pivot.columns,
+        y=pivot.index,
+        colorscale="Blues" if not percent_metric else "Sunset",
+        colorbar=dict(title=metric_choice[1], tickformat=".1f" if percent_metric else ".0f"),
+        hovertemplate="Регион: %{y}<br>Подразделение: %{x}<br>Значение: %{z:.2f}" + ("%" if percent_metric else " ₽") + "<extra></extra>",
+    ))
+    heat.update_layout(height=420, margin=dict(l=40, r=20, t=40, b=40))
+    st.plotly_chart(heat, use_container_width=True, key="region_heatmap")
+    st.caption("Теплокарта показывает значения по региону/подразделению. Отображаются подразделения с наибольшим вкладом по выбранной метрике.")
 
 
 def render_comparison_page(ctx: PageContext) -> None:
@@ -3430,13 +3771,20 @@ def _month_to_quarter(month: str) -> str:
 def render_cohort_page(ctx: PageContext) -> None:
     st.markdown("### 👥 Клиентские когорты")
     st.caption("Анализ потока новых клиентов и сохранения базы по месяцам (приближенно, на основе агрегированных метрик).")
-    available_metrics = sorted(set(ctx.df_current["Показатель"].dropna().astype(str)))
+    available_metrics = sorted(
+        m for m in ctx.df_current["Показатель"].dropna().astype(str).unique()
+        if m not in HIDDEN_METRICS
+    )
     default_new_metric = Metrics.NEW_UNIQUE_CLIENTS.value if Metrics.NEW_UNIQUE_CLIENTS.value in available_metrics else (
-        Metrics.LOAN_ISSUE_UNITS.value if Metrics.LOAN_ISSUE_UNITS.value in available_metrics else None
+        next((m for m in available_metrics if "нов" in m.lower() or "new" in m.lower()), None)
     )
     default_total_metric = Metrics.UNIQUE_CLIENTS.value if Metrics.UNIQUE_CLIENTS.value in available_metrics else (
-        Metrics.LOAN_ISSUE_UNITS.value if Metrics.LOAN_ISSUE_UNITS.value in available_metrics else None
+        Metrics.LOAN_ISSUE_UNITS.value if Metrics.LOAN_ISSUE_UNITS.value in available_metrics else (
+            next((m for m in available_metrics if "клиент" in m.lower()), None)
+        )
     )
+    if default_new_metric == default_total_metric:
+        default_total_metric = next((m for m in available_metrics if m != default_new_metric), default_total_metric)
 
     if not available_metrics:
         st.info("Нет загруженных метрик для расчёта когорт.")
@@ -3458,6 +3806,10 @@ def render_cohort_page(ctx: PageContext) -> None:
         key="cohort_total_metric",
     )
 
+    if new_metric == total_metric:
+        st.warning("Выберите разные метрики для притока и базы — иначе удержание не посчитать.")
+        return
+
     view_mode = st.radio(
         "Режим просмотра",
         options=["Сводно", "Сравнить регионы"],
@@ -3476,6 +3828,7 @@ def render_cohort_page(ctx: PageContext) -> None:
             st.info("Выберите период с метриками по клиентам.")
             return
         data = []
+        has_retention = False
         for month in months:
             new_val = float(new_series.get(month, np.nan)) if new_series is not None else np.nan
             total_val = float(total_series.get(month, np.nan)) if total_series is not None else np.nan
@@ -3483,14 +3836,15 @@ def render_cohort_page(ctx: PageContext) -> None:
             share_new = np.nan
             if pd.notna(total_val) and total_val > 0:
                 share_new = (new_val / total_val) * 100 if pd.notna(new_val) else np.nan
-                if pd.notna(new_val):
+                if pd.notna(share_new):
                     retention = max(0.0, 100 - share_new)
+                    has_retention = True
             data.append({
                 "Месяц": month,
                 "Новые клиенты": new_val,
                 "Активная база": total_val,
                 "Доля новых, %": share_new,
-                "Retention, %": retention,
+                "Удержание, %": retention,
             })
         df_clients = pd.DataFrame(data)
         fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -3513,16 +3867,17 @@ def render_cohort_page(ctx: PageContext) -> None:
             ),
             secondary_y=False,
         )
-        fig.add_trace(
-            go.Scatter(
-                x=df_clients["Месяц"],
-                y=df_clients["Retention, %"],
-                mode="lines+markers",
-                name="Retention, %",
-                line=dict(color="#10b981", width=3, dash="dot"),
-            ),
-            secondary_y=True,
-        )
+        if has_retention and df_clients["Удержание, %"].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df_clients["Месяц"],
+                    y=df_clients["Удержание, %"],
+                    mode="lines+markers",
+                    name="Удержание, %",
+                    line=dict(color="#10b981", width=3, dash="dot"),
+                ),
+                secondary_y=True,
+            )
         fig.update_layout(
             height=380,
             margin=dict(l=40, r=40, t=40, b=40),
@@ -3530,7 +3885,10 @@ def render_cohort_page(ctx: PageContext) -> None:
             hovermode="x unified",
         )
         fig.update_yaxes(title_text="Клиентов", secondary_y=False)
-        fig.update_yaxes(title_text="Retention, %", secondary_y=True, range=[0, 110])
+        if has_retention and df_clients["Удержание, %"].notna().any():
+            fig.update_yaxes(title_text="Удержание, %", secondary_y=True, range=[0, 110])
+        else:
+            fig.update_yaxes(secondary_y=True, showgrid=False, visible=False)
         st.plotly_chart(fig, use_container_width=True, key="cohort_trend")
         st.caption(f"Используются метрики: новые — «{new_metric}», база — «{total_metric}».")
 
@@ -3552,7 +3910,7 @@ def render_cohort_page(ctx: PageContext) -> None:
                 row[f"+{lag} мес."] = (retained / base) * 100
             if row:
                 retention_matrix[month] = row
-        if retention_matrix:
+        if has_retention and retention_matrix:
             cohort_df = pd.DataFrame(retention_matrix).T.fillna(0.0)
             heat = go.Figure(
                 go.Heatmap(
@@ -3570,9 +3928,9 @@ def render_cohort_page(ctx: PageContext) -> None:
                 margin=dict(l=40, r=40, t=40, b=60),
             )
             st.plotly_chart(heat, use_container_width=True, key="cohort_heatmap")
-            st.caption("Матрица retention оценивает, какая доля базы остаётся после n месяцев (на основе выбранных агрегированных метрик).")
+            st.caption("Матрица удержания показывает, какая доля клиентской базы остаётся через n месяцев (по выбранным метрикам).")
         else:
-            st.caption("Недостаточно последовательных данных для построения матрицы удержания.")
+            st.caption("Недостаточно данных для расчёта удержания — матрица скрыта, чтобы не вводить в заблуждение.")
 
         st.dataframe(
             df_clients,
@@ -3582,7 +3940,7 @@ def render_cohort_page(ctx: PageContext) -> None:
                 "Новые клиенты": st.column_config.NumberColumn("Новые клиенты", format="%.0f"),
                 "Активная база": st.column_config.NumberColumn("Активная база", format="%.0f"),
                 "Доля новых, %": st.column_config.NumberColumn("Доля новых, %", format="%.1f"),
-                "Retention, %": st.column_config.NumberColumn("Retention, %", format="%.1f"),
+                "Удержание, %": st.column_config.NumberColumn("Удержание, %", format="%.1f"),
             },
         )
     else:
@@ -3602,7 +3960,7 @@ def render_cohort_page(ctx: PageContext) -> None:
             (merged["Новые клиенты"] / merged["Активная база"]) * 100,
             np.nan,
         )
-        merged["Retention, %"] = np.where(
+        merged["Удержание, %"] = np.where(
             merged["Доля новых, %"].notna(),
             np.clip(100 - merged["Доля новых, %"], 0, 100),
             np.nan,
@@ -3637,24 +3995,25 @@ def render_cohort_page(ctx: PageContext) -> None:
         )
         st.plotly_chart(line_share, use_container_width=True, key="cohort_share_compare")
 
-        line_ret = px.line(
-            panel,
-            x="Месяц",
-            y="Retention, %",
-            color="Регион",
-            markers=True,
-            labels={"Retention, %": "Retention, %"},
-        )
-        line_ret.update_layout(
-            height=360,
-            margin=dict(l=40, r=20, t=40, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        )
-        st.plotly_chart(line_ret, use_container_width=True, key="cohort_ret_compare")
+        if panel["Удержание, %"].notna().any():
+            line_ret = px.line(
+                panel,
+                x="Месяц",
+                y="Удержание, %",
+                color="Регион",
+                markers=True,
+                labels={"Удержание, %": "Удержание, %"},
+            )
+            line_ret.update_layout(
+                height=360,
+                margin=dict(l=40, r=20, t=40, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(line_ret, use_container_width=True, key="cohort_ret_compare")
 
         summary = (
-            panel.groupby("Регион", as_index=False)[["Новые клиенты", "Активная база", "Доля новых, %", "Retention, %"]]
-            .agg({"Новые клиенты": "sum", "Активная база": "mean", "Доля новых, %": "mean", "Retention, %": "mean"})
+            panel.groupby("Регион", as_index=False)[["Новые клиенты", "Активная база", "Доля новых, %", "Удержание, %"]]
+            .agg({"Новые клиенты": "sum", "Активная база": "mean", "Доля новых, %": "mean", "Удержание, %": "mean"})
             .sort_values("Новые клиенты", ascending=False)
         )
         st.dataframe(
@@ -3665,7 +4024,7 @@ def render_cohort_page(ctx: PageContext) -> None:
                 "Новые клиенты": st.column_config.NumberColumn("Новые клиенты (Σ)", format="%.0f"),
                 "Активная база": st.column_config.NumberColumn("Активная база (ср.)", format="%.0f"),
                 "Доля новых, %": st.column_config.NumberColumn("Доля новых, % (ср.)", format="%.1f"),
-                "Retention, %": st.column_config.NumberColumn("Retention, % (ср.)", format="%.1f"),
+                "Удержание, %": st.column_config.NumberColumn("Удержание, % (ср.)", format="%.1f"),
             },
         )
 
@@ -3802,8 +4161,8 @@ def render_market_lab_page(ctx: PageContext) -> None:
 
 
 def render_management_tools(ctx: PageContext, stats_current: Dict[str, Dict[str, Any]], stats_previous: Dict[str, Dict[str, Any]] | None) -> None:
-    st.markdown("### 🧑‍💼 Управленческий блок")
-    st.caption("Авто-отчёт с рекомендациями + выгрузка и e-mail дайджест.")
+    st.markdown("### 🧑‍💼 Управленческий отчёт")
+    st.caption("Сформируйте краткий executive-дайджест и поделитесь им в Markdown, PDF или e-mail.")
     summary_lines, action_lines = build_metric_recommendations(
         stats_current,
         ctx.scenario_name,
@@ -3812,25 +4171,28 @@ def render_management_tools(ctx: PageContext, stats_current: Dict[str, Dict[str,
     )
     period_label = f"{ctx.months_range[0]} – {ctx.months_range[-1]}" if ctx.months_range else "Период не выбран"
     report_lines = [
-        f"# Отчёт по НЮЗ ({period_label})",
-        f"Сценарий: {ctx.scenario_name}. Регионов в анализе: {len(ctx.regions)}.",
+        f"# Executive Brief — НЮЗ ({period_label})",
+        f"**Сценарий:** {ctx.scenario_name}",
+        f"**Режим анализа:** {'Сравнение годов' if ctx.mode == 'compare' else 'Один год'}",
+        f"**Регионов в выборке:** {len(ctx.regions)}",
         "",
-        "## Краткие выводы",
+        "## KPI Snapshot",
     ]
-    report_lines.extend(f"- {line}" for line in summary_lines)
-    if not summary_lines:
-        report_lines.append("- Данных для выводов недостаточно.")
+    if summary_lines:
+        report_lines.extend(f"- {line}" for line in summary_lines)
+    else:
+        report_lines.append("- Недостаточно данных для формирования ключевых выводов.")
     report_lines.append("")
-    report_lines.append("## Рекомендации")
+    report_lines.append("## Priority Actions")
     if action_lines:
         report_lines.extend(f"{idx}. {line}" for idx, line in enumerate(action_lines, start=1))
     else:
-        report_lines.append("1. Добавьте данные для формирования рекомендаций.")
+        report_lines.append("1. Загрузите дополнительные показатели, чтобы подготовить рекомендации.")
     report_lines.append("")
-    report_lines.append("## Контекст")
+    report_lines.append("## Контекст и покрытие")
     report_lines.append(f"- Период: {period_label}")
-    report_lines.append(f"- Режим: {'Сравнение годов' if ctx.mode == 'compare' else 'Один год'}")
-    report_lines.append(f"- Регионов: {', '.join(ctx.regions[:10])}{'…' if len(ctx.regions) > 10 else ''}")
+    sample_regions = ", ".join(ctx.regions[:10]) + (" …" if len(ctx.regions) > 10 else "")
+    report_lines.append(f"- Регионы: {sample_regions if sample_regions else 'не выбраны'}")
 
     report_md = "\n".join(report_lines)
     report_plain = report_md.replace("**", "").replace("#", "")
@@ -5009,7 +5371,7 @@ def summary_block(agg_data, df_all, regions, months_range, all_available_months,
     st.caption("Все значения — ровно из строк «Итого по месяцу» в загруженных файлах. Никаких формул.")
 
     sub = df_all[df_all["Регион"].isin(regions)]
-    raw_metrics = sorted(sub["Показатель"].dropna().unique())
+    raw_metrics = [m for m in sorted(sub["Показатель"].dropna().unique()) if m not in HIDDEN_METRICS]
 
     # соберём таблицу: строки — регионы; столбцы — метрики
     rows = []
@@ -5076,7 +5438,7 @@ def leaderboard_block(
     period_slider_key: str = "leaderboard_period"
 ) -> None:
     st.subheader("🏆 Лидеры и аутсайдеры")
-    st.caption("Рейтинг филиалов по выбранной метрике из файла за период.")
+    st.caption("Сравниваем филиалы по выбранной метрике: слева — лидеры, справа — те, кто требует внимания.")
 
     if df_all.empty or not available_months:
         st.info("Нет данных для отображения.")
@@ -5107,7 +5469,7 @@ def leaderboard_block(
     # Сформируем пул допустимых метрик только из тех, что есть в файле
     raw_metric_names = set(df_all["Показатель"].dropna().unique())
     numeric_cols = [c for c in agg_data.columns if pd.api.types.is_numeric_dtype(agg_data[c]) and c != "Код"]
-    metric_options = sorted([c for c in numeric_cols if c in raw_metric_names])
+    metric_options = sorted([c for c in numeric_cols if c in raw_metric_names and c not in HIDDEN_METRICS])
 
     if not metric_options:
         st.warning("В исходных файлах не найдено числовых метрик для рейтинга.")
@@ -5127,6 +5489,9 @@ def leaderboard_block(
     st.caption(METRIC_HELP.get(chosen_metric, ""))
 
     # определим правило «чем больше — тем лучше»
+    percent_metric = is_percent_metric(chosen_metric)
+    is_money = "руб" in chosen_metric.lower()
+    is_days = "дней" in chosen_metric.lower()
     if chosen_metric in METRICS_BIGGER_IS_BETTER:
         ascending = False
     elif chosen_metric in METRICS_SMALLER_IS_BETTER:
@@ -5135,6 +5500,14 @@ def leaderboard_block(
         ascending = False
 
     sorted_data = agg_data.dropna(subset=[chosen_metric]).sort_values(by=chosen_metric, ascending=ascending)
+    metric_series = sorted_data[chosen_metric]
+    if not metric_series.empty:
+        if not percent_metric:
+            total_val = float(metric_series.abs().sum())
+            if total_val > 1e-9:
+                sorted_data["Доля, %"] = (metric_series / total_val) * 100
+        mean_val = float(metric_series.mean()) if not metric_series.empty else 0.0
+        sorted_data["Отклонение от среднего"] = metric_series - mean_val
     top_limit = min(20, len(sorted_data)) if not sorted_data.empty else 0
     if top_limit == 0:
         st.warning("Нет записей для рейтинга после сортировки")
@@ -5159,26 +5532,49 @@ def leaderboard_block(
         title_worst = f"❌ Топ-{top_n} худших"
 
     c1, c2 = st.columns(2)
+    display_cols = ["Подразделение","Регион",chosen_metric]
+    if "Доля, %" in sorted_data.columns:
+        display_cols.append("Доля, %")
+    if "Отклонение от среднего" in sorted_data.columns:
+        display_cols.append("Отклонение от среднего")
+
+    col_cfg = default_column_config(sorted_data)
+    if "Доля, %" in display_cols:
+        col_cfg["Доля, %"] = st.column_config.NumberColumn("Доля от итога, %", format="%.1f%%")
+    if "Отклонение от среднего" in display_cols:
+        format_label = "Отклонение, п.п." if percent_metric else ("Отклонение, дн." if is_days else "Отклонение от среднего")
+        fmt = "%.2f"
+        if is_money and not percent_metric and not is_days:
+            fmt = "%.0f"
+        col_cfg["Отклонение от среднего"] = st.column_config.NumberColumn(format_label, format=fmt)
+
     with c1:
         st.markdown(f"**{title_best} по _{chosen_metric}_**")
-        st.dataframe(sorted_data.head(top_n)[["Подразделение","Регион",chosen_metric]], use_container_width=True, column_config=default_column_config(sorted_data))
+        st.dataframe(sorted_data.head(top_n)[display_cols], use_container_width=True, column_config=col_cfg)
     with c2:
         st.markdown(f"**{title_worst} по _{chosen_metric}_**")
         worst5 = sorted_data.tail(top_n)
         worst5 = worst5.iloc[::-1].copy()
-        st.dataframe(worst5[["Подразделение","Регион",chosen_metric]], use_container_width=True, column_config=default_column_config(sorted_data))
+        st.dataframe(worst5[display_cols], use_container_width=True, column_config=col_cfg)
+    st.caption("Используйте долю и отклонение, чтобы понять вклад филиала и его дистанцию от среднего уровня.")
 
     insight_lines = []
     if not sorted_data.empty:
         top_row = sorted_data.iloc[0]
         best_name = f"{top_row['Подразделение']} ({top_row['Регион']})"
         best_val = _format_value_for_metric(chosen_metric, top_row[chosen_metric])
-        insight_lines.append(f"Лидирует {best_name}: {best_val} по метрике {chosen_metric}.")
+        extra = ""
+        if "Доля, %" in sorted_data.columns:
+            extra = f" — доля {top_row['Доля, %']:.1f}%"
+        insight_lines.append(f"Лидирует {best_name}: {best_val}{extra}.")
         bottom_row = sorted_data.iloc[-1]
         if bottom_row.name != top_row.name:
             worst_name = f"{bottom_row['Подразделение']} ({bottom_row['Регион']})"
             worst_val = _format_value_for_metric(chosen_metric, bottom_row[chosen_metric])
-            insight_lines.append(f"Наименьшее значение у {worst_name}: {worst_val}.")
+            extra_w = ""
+            if "Доля, %" in sorted_data.columns:
+                extra_w = f" — доля {bottom_row['Доля, %']:.1f}%"
+            insight_lines.append(f"Наименьшее значение у {worst_name}: {worst_val}{extra_w}.")
     _render_insights("Что важно в рейтинге", insight_lines)
     series_for_actions = sorted_data.set_index(["Подразделение","Регион"])[chosen_metric]
     action_lines = _generate_actions_for_series(series_for_actions, chosen_metric)
@@ -5196,7 +5592,7 @@ def comparison_block(
     period_b_key: str = "comparison_period_b"
 ) -> None:
     st.subheader("⚖️ Сравнение периодов")
-    st.caption("Сравнение филиалов по метрикам из файла за два разных периода.")
+    st.caption("Выберите два диапазона месяцев: период A — база, период B — сравнение. Таблица покажет изменения по каждому филиалу.")
     if df_all.empty or not available_months: st.info("Нет данных для сравнения."); return
     c1, c2 = st.columns(2)
     with c1:
@@ -5222,7 +5618,7 @@ def comparison_block(
 
     raw_metric_names = set(df_all["Показатель"].dropna().unique())
     all_metrics = sorted([c for c in data_a.columns if pd.api.types.is_numeric_dtype(data_a[c]) and c != "Код"])
-    metric_options = [m for m in all_metrics if m in raw_metric_names]
+    metric_options = [m for m in all_metrics if m in raw_metric_names and m not in HIDDEN_METRICS]
     if not metric_options:
         st.warning("Нет метрик из файла для сравнения.")
         return
@@ -5249,8 +5645,14 @@ def comparison_block(
         "Абсолютное изменение": number_column_config("Изм. (абс.)", money=is_money and not is_percent and not is_days, percent=False, days=False),
         "Относительное изменение, %": st.column_config.NumberColumn("Изм. (%)", format="%.1f%%"),
     }
-    st.dataframe(comparison_df[["Подразделение","Регион",col_a,col_b,"Абсолютное изменение","Относительное изменение, %"]].sort_values("Абсолютное изменение", ascending=False).dropna(subset=["Абсолютное изменение"]), use_container_width=True, column_config=cfg)
-    st.info("**На что обратить внимание:** Ищите строки, где относительное изменение существенно отличается от нуля. Если какой-то филиал показал значительный рост доли ниже займа или падение доходности, это требует изучения причин (возможно, ухудшение качества залогов или изменение поведения клиентов).")
+    st.dataframe(
+        comparison_df[["Подразделение","Регион",col_a,col_b,"Абсолютное изменение","Относительное изменение, %"]]
+        .sort_values("Абсолютное изменение", ascending=False)
+        .dropna(subset=["Абсолютное изменение"]),
+        use_container_width=True,
+        column_config=cfg
+    )
+    st.caption("Положительное изменение говорит о росте относительно базы, отрицательное — о просадке. Ориентируйтесь на столбец с относительным изменением, чтобы оценить масштаб." )
 
     insight_lines = []
     delta_series = comparison_df.dropna(subset=["Абсолютное изменение"]).set_index(["Подразделение","Регион"])["Абсолютное изменение"]
@@ -5305,10 +5707,11 @@ def dynamics_block(
         st.info("Выберите метрики.");
         return
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     only_actual = c1.checkbox("Только фактические месяцы", True, key=f"{widget_prefix}_actual")
     show_trend = c2.checkbox("Линия тренда", True, key=f"{widget_prefix}_trend")
     fast_plot = c3.checkbox("Облегчить отрисовку", False, key=f"{widget_prefix}_fast")
+    use_log = c4.checkbox("Лог. ось Y", False, key=f"{widget_prefix}_log")
 
     for met in metrics:
         gp = get_monthly_totals_from_file(df_all, tuple(regions), met)
@@ -5398,6 +5801,7 @@ def dynamics_block(
         subtitle = f"Источник: строки «Итого по месяцу». Агрегация за период: {rule_text}."
         fig.update_layout(title={'text': f"{met}<br><sup>{subtitle}</sup>", 'x':0}, hovermode="x unified", margin=dict(t=70,l=0,r=0,b=0))
         fig.update_yaxes(tickformat=tickfmt, ticksuffix=suf.strip(), title_text=suf.strip() or None)
+        fig.update_yaxes(type="log" if use_log else "linear")
 
         st.plotly_chart(fig, use_container_width=True)
         insight = _describe_deltas(deltas, met)
@@ -5443,9 +5847,10 @@ def dynamics_compare_block(
         default=default_selection,
         key=f"{widget_prefix}_metrics"
     )
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     only_actual = c1.checkbox("Только фактические месяцы", True, key=f"{widget_prefix}_actual")
     show_trend = c2.checkbox("Линия тренда", False, key=f"{widget_prefix}_trend")
+    use_log = c3.checkbox("Лог. ось Y", False, key=f"{widget_prefix}_log")
     if not metrics or not months_range:
         st.info("Выберите метрики и период."); return
 
@@ -5553,6 +5958,7 @@ def dynamics_compare_block(
         fig.update_layout(title={'text': f"{met}<br><sup>{subtitle}</sup>", 'x': 0},
                           hovermode="x unified", margin=dict(t=70, l=0, r=0, b=0))
         fig.update_yaxes(tickformat=tickfmt, ticksuffix=suf.strip(), title_text=suf.strip() or None)
+        fig.update_yaxes(type="log" if use_log else "linear")
         st.plotly_chart(fig, use_container_width=True)
         insight = _describe_deltas(delta_records, met)
         if insight:
@@ -6044,6 +6450,42 @@ def main():
 
     with sidebar:
         st.markdown("<hr class='sidebar-divider'>", unsafe_allow_html=True)
+        st.markdown("<p class='sidebar-title'>Пороговые значения</p>", unsafe_allow_html=True)
+        thresholds_state = st.session_state.get("thresholds_config", {"min_markup": 45.0, "max_risk": 25.0, "loss_cap": 5.0})
+        min_markup_threshold = st.number_input(
+            "Мин. наценка, %",
+            min_value=0.0,
+            max_value=200.0,
+            value=float(thresholds_state.get("min_markup", 45.0)),
+            step=1.0,
+            key="threshold_min_markup"
+        )
+        max_risk_threshold = st.number_input(
+            "Макс. риск, %",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(thresholds_state.get("max_risk", 25.0)),
+            step=1.0,
+            key="threshold_max_risk"
+        )
+        loss_cap_threshold = st.number_input(
+            "Лимит убытка, млн ₽",
+            min_value=0.0,
+            max_value=500.0,
+            value=float(thresholds_state.get("loss_cap", 5.0)),
+            step=0.5,
+            key="threshold_loss_cap"
+        )
+
+    thresholds_config = {
+        "min_markup": float(min_markup_threshold),
+        "max_risk": float(max_risk_threshold),
+        "loss_cap": float(loss_cap_threshold),
+    }
+    st.session_state["thresholds_config"] = thresholds_config
+
+    with sidebar:
+        st.markdown("<hr class='sidebar-divider'>", unsafe_allow_html=True)
         st.markdown("<p class='sidebar-title'>Действия</p>", unsafe_allow_html=True)
         col_reset, col_restart = st.columns(2)
         reset_trigger = col_reset.button("Сброс", use_container_width=True, key="btn_reset")
@@ -6085,6 +6527,20 @@ def main():
                 key="single_regions"
             )
             st.caption(f"Используем {len(regions)} из {len(regions_all)} регионов.")
+            preset_cols = st.columns(3)
+            top_revenue_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.REVENUE.value, top_n=5)
+            high_risk_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.RISK_SHARE.value, top_n=5)
+            branch_map = period_values_by_region_from_itogo(df_current, regions_all, Metrics.BRANCH_NEW_COUNT.value, months_range)
+            new_branch_regions = [reg for reg, val in sorted(branch_map.items(), key=lambda kv: kv[1] if kv[1] is not None else 0, reverse=True) if val and not pd.isna(val) and val > 0][:5] if branch_map else []
+            if preset_cols[0].button("ТОП-5 выручка", use_container_width=True, key="single_preset_revenue", disabled=not top_revenue_regions):
+                st.session_state["single_regions"] = top_revenue_regions
+                st.experimental_rerun()
+            if preset_cols[1].button("Высокий риск", use_container_width=True, key="single_preset_risk", disabled=not high_risk_regions):
+                st.session_state["single_regions"] = high_risk_regions
+                st.experimental_rerun()
+            if preset_cols[2].button("Новые филиалы", use_container_width=True, key="single_preset_new", disabled=not new_branch_regions):
+                st.session_state["single_regions"] = new_branch_regions
+                st.experimental_rerun()
         if not regions:
             st.warning("Выберите хотя бы один регион для анализа.")
             st.stop()
@@ -6124,6 +6580,7 @@ def main():
             year_previous=None,
             color_map=color_map,
             strict_mode=strict_mode,
+            thresholds=thresholds_config,
         )
 
         tabs = st.tabs([f"{icon} {title}" for icon, title, _ in tab_specs])
@@ -6144,6 +6601,20 @@ def main():
                 key="compare_regions"
             )
             st.caption(f"Используем {len(regions)} из {len(regions_all)} регионов.")
+            preset_cols = st.columns(3)
+            top_revenue_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.REVENUE.value, top_n=5)
+            high_risk_regions = _top_regions_by_metric(df_current, regions_all, months_range, Metrics.RISK_SHARE.value, top_n=5)
+            branch_map_cmp = period_values_by_region_from_itogo(df_current, regions_all, Metrics.BRANCH_NEW_COUNT.value, months_range)
+            new_branch_regions = [reg for reg, val in sorted(branch_map_cmp.items(), key=lambda kv: kv[1] if kv[1] is not None else 0, reverse=True) if val and not pd.isna(val) and val > 0][:5] if branch_map_cmp else []
+            if preset_cols[0].button("ТОП-5 выручка", use_container_width=True, key="compare_preset_revenue", disabled=not top_revenue_regions):
+                st.session_state["compare_regions"] = top_revenue_regions
+                st.experimental_rerun()
+            if preset_cols[1].button("Высокий риск", use_container_width=True, key="compare_preset_risk", disabled=not high_risk_regions):
+                st.session_state["compare_regions"] = high_risk_regions
+                st.experimental_rerun()
+            if preset_cols[2].button("Новые филиалы", use_container_width=True, key="compare_preset_new", disabled=not new_branch_regions):
+                st.session_state["compare_regions"] = new_branch_regions
+                st.experimental_rerun()
         if not regions:
             st.warning("Выберите хотя бы один регион для анализа.")
             st.stop()
@@ -6183,6 +6654,7 @@ def main():
             year_previous=year_previous,
             color_map=color_map,
             strict_mode=strict_mode,
+            thresholds=thresholds_config,
         )
 
         tabs = st.tabs([f"{icon} {title}" for icon, title, _ in tab_specs])
@@ -6192,6 +6664,22 @@ def main():
 
 
 def render_home_page(ctx: PageContext) -> None:
+    available_metrics = set(ctx.df_current["Показатель"].dropna().unique())
+    missing_core = [m for m in KEY_DECISION_METRICS if m not in available_metrics]
+    tab_hints = {
+        name: [metric for metric in metrics if metric not in available_metrics]
+        for name, metrics in TAB_METRIC_DEPENDENCIES.items()
+    }
+    if missing_core or any(tab_hints.values()):
+        st.warning("В загруженных данных нет части ключевых показателей. Добавьте перечисленные метрики, чтобы раскрыть полный функционал.")
+        if missing_core:
+            st.markdown("**Минимальный набор:**")
+            st.markdown("\n".join(f"- {metric}" for metric in missing_core))
+        actionable = [(tab, metrics) for tab, metrics in tab_hints.items() if metrics]
+        if actionable:
+            st.markdown("**Для вкладок:**")
+            st.markdown("\n".join(f"- {tab}: {', '.join(metrics)}" for tab, metrics in actionable))
+
     metrics_sequence = KEY_DECISION_METRICS + SUPPORT_DECISION_METRICS
     stats_current = {
         metric: compute_metric_stats(ctx.df_current, ctx.regions, ctx.months_range, metric)
@@ -6403,6 +6891,8 @@ def render_sales_page(ctx: PageContext) -> None:
     st.divider()
     render_revenue_waterfall(ctx)
     st.divider()
+    sales_intelligence_block(ctx, ctx.thresholds)
+    st.divider()
     render_margin_capacity_planner(ctx, widget_prefix="sales_margin")
     st.divider()
     if ctx.mode == "compare":
@@ -6432,6 +6922,7 @@ def render_risk_page(ctx: PageContext) -> None:
     suffix = "_cmp" if ctx.mode == "compare" else ""
     title = "### ⚠️ Риски и устойчивость" if ctx.mode == "single" else "### ⚠️ Риски (сравнение годов)"
     st.markdown(title)
+    st.caption("Ключевой индикатор — «Доля ниже займа, %»: показывает, какая часть выручки от распродажи получена по товарам, проданным дешевле суммы займа. Рост означает усиление убыточных продаж.")
     render_tab_summary(ctx, TAB_METRIC_SETS["risk"], title="#### 🧭 Executive summary — риски")
     st.divider()
     alert_config = risk_alerts_block(ctx)
@@ -6490,6 +6981,8 @@ def render_risk_page(ctx: PageContext) -> None:
 def render_data_page(ctx: PageContext) -> None:
     title = "### 📅 Валидация и данные" if ctx.mode == "single" else "### 📅 Валидация (год B)"
     st.markdown(title)
+    render_health_check(ctx)
+    st.divider()
     month_check_block(ctx.df_current, ctx.regions, ctx.months_range, ctx.months_available)
     st.divider()
     render_correlation_block(ctx.df_current, ctx.regions, ctx.months_range, default_metrics=FORECAST_METRICS)
@@ -6504,6 +6997,7 @@ def render_data_page(ctx: PageContext) -> None:
     ]
     export_block(export_filtered)
     info_block()
+    render_faq_block()
 
 
 def render_ai_page(ctx: PageContext) -> None:
